@@ -35,12 +35,13 @@ python concurrency_bench.py --model mistralai/Devstral-Small-2-24B-Instruct-2512
 # ---- SGLang (its own environment)
 if [ -f /workspace/sgl/bin/activate ]; then
   . /workspace/sgl/bin/activate
+  export SGLANG_ENABLE_JIT_DEEPGEMM=${SGLANG_ENABLE_JIT_DEEPGEMM:-0}   # DeepGEMM needs NVCC >= 12.9
   for m in "granite_hmicro|ibm-granite/granite-4.0-h-micro" "nemo3_nano30b|nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8"; do
     IFS='|' read -r name hf <<< "$m"
     pkill -f "sglang_multiturn.py|retention_bench.py --engine sglang|sglang::" 2>/dev/null; sleep 3
     run "$name" sgl_auto  sglang '{}' "$hf"
     pkill -f "retention_bench.py --engine sglang|sglang::" 2>/dev/null; sleep 3
-    run "$name" sgl_nobuf sglang '{"mamba_radix_cache_strategy":"no_buffer"}' "$hf"
+    run "$name" sgl_nobuf sglang '{"mamba_radix_cache_strategy":"no_buffer","disable_overlap_schedule":true}' "$hf"
   done
   deactivate
 else

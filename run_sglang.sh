@@ -12,6 +12,9 @@ fi
 . /workspace/sgl/bin/activate
 python -c "import sglang; print('sglang', sglang.__version__)" | tee results/sglang_version.txt || { echo "ERROR: sglang does not import"; exit 1; }
 export HF_HOME=${HF_HOME:-/workspace/hf}
+# SGLang's DeepGEMM kernels need NVCC >= 12.9 to compile; turn them off so older CUDA
+# toolkits work (standard kernels are used instead). Set SGLANG_ENABLE_JIT_DEEPGEMM=1 to override.
+export SGLANG_ENABLE_JIT_DEEPGEMM=${SGLANG_ENABLE_JIT_DEEPGEMM:-0}
 mkdir -p results/logs
 
 MODELS=(
@@ -23,7 +26,7 @@ MODELS=(
 # nobuf     = no_buffer: a finished request hands its exact final state to the cache
 VARIANTS=(
   'sgl_auto|{}'
-  'sgl_nobuf|{"mamba_radix_cache_strategy":"no_buffer"}'
+  'sgl_nobuf|{"mamba_radix_cache_strategy":"no_buffer","disable_overlap_schedule":true}'
 )
 
 for m in "${MODELS[@]}"; do
