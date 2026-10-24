@@ -13,7 +13,12 @@ TRACE=traces/swe_smith.json
 FINE='{"mamba_cache_mode":"align","prefix_match_unit":16}'
 NOBUF='{"mamba_radix_cache_strategy":"no_buffer","disable_overlap_schedule":true}'
 
-python -c "from vllm import LLM" 2>/dev/null || { echo "ERROR: run from the vLLM environment (deactivate the SGLang venv)"; exit 1; }
+if ! python -c "from vllm import LLM" 2>results/logs/vllm_check.log; then
+  echo "ERROR: vLLM does not import with $(which python). Last lines of the error:"
+  tail -5 results/logs/vllm_check.log
+  echo "If you are in the SGLang venv, run: deactivate. If vLLM is not installed on this pod, run: bash setup.sh"
+  exit 1
+fi
 
 # ---- 1. trace file
 if [ ! -s "$TRACE" ]; then
