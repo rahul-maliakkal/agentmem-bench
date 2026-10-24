@@ -37,7 +37,8 @@ class SglEngine:
         args.update(engine_args)
         self.llm = sgl.Engine(**args)
         from transformers import AutoTokenizer
-        self.vocab = AutoTokenizer.from_pretrained(model, trust_remote_code=True).vocab_size
+        self.tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
+        self.vocab = self.tokenizer.vocab_size
         try:
             info = self.llm.get_server_info()
             self.strategy = info.get("mamba_radix_cache_strategy", "?")
@@ -81,21 +82,32 @@ def main():
     ap.add_argument("--tool-min", type=int, default=30)
     ap.add_argument("--tool-max", type=int, default=6000)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--trace", help="replay real agent sessions from prepare_traces.py")
+    ap.add_argument("--trace-sessions", type=int, default=12)
+    ap.add_argument("--trace-turns", type=int, default=None)
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
     eng = SglEngine(a.model, a.max_model_len, a.mem_frac, json.loads(a.engine_args))
     print(f"[info] SGLang mamba_radix_cache_strategy = {eng.strategy}", flush=True)
 
-    sessions = make_sessions(a.sessions, a.turns, a.sys_len, a.task_len, a.gen_len, a.tool_median,
-                             a.tool_sigma, a.tool_min, a.tool_max, a.max_model_len, a.seed)
     toks = Tokens(eng.vocab, a.seed)
-    system = toks.take(a.sys_len)
+    if a.trace:
+        from traces import load_trace, describe
+        system, tsess = load_trace(a.trace, eng.tokenizer, a.max_model_len, a.trace_sessions, a.trace_turns)
+        print("[info] " + describe(system, tsess), flush=True)
+        sessions = [{"session": t["session"], "task_len": len(t["task"]), "tools": [len(x["tool"]) for x in t["turns"]],
+                     "task_ids": t["task"], "tool_ids": [x["tool"] for x in t["turns"]],
+                     "gen_lens": [x["gen_len"] for x in t["turns"]]} for t in tsess]
+    else:
+        sessions = make_sessions(a.sessions, a.turns, a.sys_len, a.task_len, a.gen_len, a.tool_median,
+                                 a.tool_sigma, a.tool_min, a.tool_max, a.max_model_len, a.seed)
+        system = toks.take(a.sys_len)
     eng.run(Tokens(eng.vocab, 999).take(256), 4)  # warmup
 
     rows = []
     for s in sessions:
-        hist = system + toks.take(s["task_len"])
+        hist = system + (s["task_ids"] if "task_ids" in s else toks.take(s["task_len"]))
         new_tokens = s["task_len"]
         for turn in range(len(s["tools"]) + 1):
             _, cached, resume_ms = eng.run(hist, 1)
@@ -107,11 +119,12 @@ def main():
                 row["recomputed"] = rec
                 row["wasted"] = max(0, rec - new_tokens)
             rows.append(row)
-            gen, _, _ = eng.run(hist, a.gen_len)
+            g = s["gen_lens"][turn] if "gen_lens" in s and turn < len(s["gen_lens"]) else a.gen_len
+            gen, _, _ = eng.run(hist, g)
             hist = hist + gen
             if turn < len(s["tools"]):
                 t = s["tools"][turn]
-                hist = hist + toks.take(t)
+                hist = hist + (s["tool_ids"][turn] if "tool_ids" in s else toks.take(t))
                 new_tokens = t
         w = [r["wasted"] for r in rows if r["session"] == s["session"] and r["turn"] > 0 and "wasted" in r]
         print(f"session {s['session']}: final ctx {len(hist):,}"

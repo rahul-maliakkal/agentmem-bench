@@ -31,6 +31,12 @@ Tested on one NVIDIA H100 80GB (PCIe Gen5), vLLM 0.32, SGLang 0.5.22.
 | 7 | How many concurrent agents does one GPU serve? (vLLM; `--engine sglang` for SGLang) | `concurrency_bench.py` | `run_concurrency.sh`, `run_sglang_concurrency.sh` |
 | 8 | How many paused sessions keep their resume point as the cache fills? | `retention_bench.py` | `run_checkpoint.sh` |
 
+**Real agent sessions.** `run_traces.sh` reruns experiments 4–7 on real coding-agent sessions:
+SWE-agent runs (Claude 3.7 Sonnet on SWE-smith tasks, [SWE-smith trajectories](https://huggingface.co/datasets/SWE-bench/SWE-smith-trajectories), MIT).
+`prepare_traces.py` keeps the real system prompt, task and tool outputs and the length of each
+reply; the benchmarks then let the model generate replies of those lengths (`--trace`). Tool
+pause times are not in the traces and stay simulated.
+
 `run_pending.sh` runs experiments 4–7 back to back. Every runner skips work that already
 has results, so it is safe to restart.
 

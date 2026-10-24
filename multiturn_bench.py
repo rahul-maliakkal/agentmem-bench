@@ -79,7 +79,8 @@ class VllmEngine:
                     enable_prefix_caching=True, trust_remote_code=True)
         args.update(engine_args)
         self.llm = LLM(**args)
-        self.vocab = self.llm.get_tokenizer().vocab_size
+        self.tokenizer = self.llm.get_tokenizer()
+        self.vocab = self.tokenizer.vocab_size
         self.warned = False
 
     def run(self, ids, max_tokens):
@@ -98,7 +99,7 @@ class FakeEngine:
     """Simulates block-granular state restore, to test the pipeline without a GPU."""
 
     def __init__(self, block):
-        self.block, self.vocab, self.cache = block, 150000, set()
+        self.block, self.vocab, self.cache, self.tokenizer = block, 150000, set(), None
 
     def run(self, ids, max_tokens):
         cached = 0
@@ -132,6 +133,9 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--block", type=int, default=528, help="dry-run only: simulated block size")
+    ap.add_argument("--trace", help="replay real agent sessions from prepare_traces.py instead of synthetic ones")
+    ap.add_argument("--trace-sessions", type=int, default=12)
+    ap.add_argument("--trace-turns", type=int, default=None, help="cap turns per session (default: until max-model-len)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
@@ -146,17 +150,25 @@ def main():
             sys.exit(f"[skip] engine rejected args {a.engine_args}: {e}")
         model = a.model
 
-    sessions = make_sessions(a.sessions, a.turns, a.sys_len, a.task_len, a.gen_len, a.tool_median,
-                             a.tool_sigma, a.tool_min, a.tool_max, a.max_model_len, a.seed)
     toks = Tokens(eng.vocab, a.seed)
-    system = toks.take(a.sys_len)  # shared across sessions, like a real agent framework
+    if a.trace:
+        from traces import load_trace, describe
+        system, tsess = load_trace(a.trace, eng.tokenizer, a.max_model_len, a.trace_sessions, a.trace_turns)
+        print("[info] " + describe(system, tsess), flush=True)
+        sessions = [{"session": t["session"], "task_len": len(t["task"]), "tools": [len(x["tool"]) for x in t["turns"]],
+                     "task_ids": t["task"], "tool_ids": [x["tool"] for x in t["turns"]],
+                     "gen_lens": [x["gen_len"] for x in t["turns"]]} for t in tsess]
+    else:
+        sessions = make_sessions(a.sessions, a.turns, a.sys_len, a.task_len, a.gen_len, a.tool_median,
+                                 a.tool_sigma, a.tool_min, a.tool_max, a.max_model_len, a.seed)
+        system = toks.take(a.sys_len)  # shared across sessions, like a real agent framework
 
     # warm up kernels / CUDA graphs on an unrelated prompt
     eng.run(Tokens(eng.vocab, 999).take(256), 4)
 
     rows = []
     for s in sessions:
-        hist = system + toks.take(s["task_len"])
+        hist = system + (s["task_ids"] if "task_ids" in s else toks.take(s["task_len"]))
         new_tokens = s["task_len"]  # turn 0: system prompt may be cached, the task is new
         for turn in range(len(s["tools"]) + 1):
             # 1) resume: prefill the history + first token (this is what the agent waits for)
@@ -171,12 +183,13 @@ def main():
                 row["wasted"] = max(0, rec - new_tokens)
             rows.append(row)
             # 2) the model writes its tool call (decode); its KV/state now exists on the GPU
-            gen, _, _ = eng.run(hist, a.gen_len)
+            g = s["gen_lens"][turn] if "gen_lens" in s and turn < len(s["gen_lens"]) else a.gen_len
+            gen, _, _ = eng.run(hist, g)
             hist = hist + gen
             # 3) the tool returns; its output is appended for the next turn
             if turn < len(s["tools"]):
                 t = s["tools"][turn]
-                hist = hist + toks.take(t)
+                hist = hist + (s["tool_ids"][turn] if "tool_ids" in s else toks.take(t))
                 new_tokens = t
         last = [r for r in rows if r["session"] == s["session"]]
         w = [r["wasted"] for r in last if r.get("wasted") != "" and r["turn"] > 0 and "wasted" in r]

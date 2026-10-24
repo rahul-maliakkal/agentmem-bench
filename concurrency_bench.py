@@ -56,6 +56,7 @@ def engine_args_to_cli(engine_args):
 
 
 ENGINE = "vllm"   # set from --engine in main(); "vllm" or "sglang"
+TRACE = None      # (system ids, sessions) when --trace is given
 
 
 def start_server(model, port, max_len, gpu_util, engine_args, log_path):
@@ -201,20 +202,23 @@ class Rng:
 async def agent(aid, a, url, session, system, vocab, max_ctx, req_rows, job_rows, t0, warn):
     rng = Rng(a.seed * 100003 + aid, vocab)
     await asyncio.sleep(rng.r.uniform(0, a.stagger_s))  # agents arrive over a few seconds
-    hist = system + rng.toks(a.task_len)
+    tsess = TRACE[1][aid % len(TRACE[1])] if TRACE is not None else None
+    hist = system + (list(tsess["task"]) if tsess else rng.toks(a.task_len))
+    n_turns = min(a.turns, len(tsess["turns"])) if tsess else a.turns
     start = time.time()
     turns_done = 0
-    for turn in range(a.turns):
-        if len(hist) + a.gen_len + 64 > max_ctx:
+    for turn in range(n_turns):
+        gen_len = tsess["turns"][turn]["gen_len"] if tsess else a.gen_len
+        if len(hist) + gen_len + 64 > max_ctx:
             break
         if ENGINE == "sglang":
-            body = {"input_ids": hist, "sampling_params": {"max_new_tokens": a.gen_len, "temperature": 0.0,
+            body = {"input_ids": hist, "sampling_params": {"max_new_tokens": gen_len, "temperature": 0.0,
                                                            "ignore_eos": True}}
             if warn.get("logprob_ids"):
                 body.update({"return_logprob": True, "logprob_start_len": -1, "top_logprobs_num": 0})
             path = "/generate"
         else:
-            body = {"model": "bench", "prompt": hist, "max_tokens": a.gen_len, "temperature": 0.0,
+            body = {"model": "bench", "prompt": hist, "max_tokens": gen_len, "temperature": 0.0,
                     "ignore_eos": True, "return_token_ids": True}
             path = "/v1/completions"
         ts = time.time()
@@ -252,7 +256,7 @@ async def agent(aid, a, url, session, system, vocab, max_ctx, req_rows, job_rows
                 print("[warn] server did not return token_ids; appending placeholder tokens "
                       "(prefix reuse of the model's own reply will be understated)", file=sys.stderr)
                 warn["ids"] = True
-            gen = rng.toks(a.gen_len)
+            gen = rng.toks(gen_len)
         if ENGINE == "sglang":
             cached = cached_sgl
         else:
@@ -263,9 +267,12 @@ async def agent(aid, a, url, session, system, vocab, max_ctx, req_rows, job_rows
                          "latency_s": round(lat, 3), "start_s": round(ts - t0, 2)})
         hist = hist + list(gen)
         turns_done += 1
-        if turn < a.turns - 1:
+        if turn < n_turns - 1:
             await asyncio.sleep(rng.lognorm(a.tool_median_s, a.tool_sigma, a.tool_min_s, a.tool_max_s))
-            hist = hist + rng.toks(int(rng.lognorm(a.tool_median_tok, 1.0, 30, a.tool_max_tok)))
+            if tsess:
+                hist = hist + list(tsess["turns"][turn]["tool"])  # the recorded tool output
+            else:
+                hist = hist + rng.toks(int(rng.lognorm(a.tool_median_tok, 1.0, 30, a.tool_max_tok)))
     job_rows.append({"agent": aid, "turns": turns_done, "jct_s": round(time.time() - start, 2),
                      "final_ctx": len(hist)})
 
@@ -273,6 +280,8 @@ async def agent(aid, a, url, session, system, vocab, max_ctx, req_rows, job_rows
 async def run_load(a, url, n_agents, vocab, out_prefix):
     seed_rng = random.Random(a.seed * 7 + n_agents)
     system = [seed_rng.randrange(1000, max(1001, min(vocab, 100000) - 1000)) for _ in range(a.sys_len)]
+    if TRACE is not None:
+        system = TRACE[0]  # the real shared system prompt
     try:  # start every run with an empty prefix cache
         async with aiohttp.ClientSession() as s:
             reset = "/flush_cache" if ENGINE == "sglang" else "/reset_prefix_cache"
@@ -391,7 +400,13 @@ async def amain(a):
         vocab = a.vocab
     else:
         from transformers import AutoTokenizer
-        vocab = AutoTokenizer.from_pretrained(a.model, trust_remote_code=True).vocab_size
+        tok = AutoTokenizer.from_pretrained(a.model, trust_remote_code=True)
+        vocab = tok.vocab_size
+    if a.trace:
+        global TRACE
+        from traces import load_trace, describe
+        TRACE = load_trace(a.trace, None if a.vocab else tok, a.max_model_len, None, None)
+        print("[info] " + describe(*TRACE), flush=True)
     os.makedirs(a.out_dir, exist_ok=True)
     tag = a.tag or a.model.split("/")[-1]
     proc = None
@@ -458,6 +473,7 @@ def main():
                     help="stop a load level if no model call finishes for this many seconds")
     ap.add_argument("--redo", action="store_true", help="rerun load levels that already have results")
     ap.add_argument("--vocab", type=int, help="skip loading the tokenizer (testing)")
+    ap.add_argument("--trace", help="replay real agent sessions from prepare_traces.py (agent i uses session i mod n)")
     ap.add_argument("--out-dir", required=True)
     a = ap.parse_args()
     global ENGINE

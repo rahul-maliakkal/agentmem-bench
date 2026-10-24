@@ -2,3 +2,4 @@ results/
 results_*.tar.gz
 __pycache__/
 *.pyc
+traces/
