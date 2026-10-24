@@ -416,7 +416,17 @@ async def amain(a):
         proc = start_server(a.model, a.port, a.max_model_len, a.gpu_util, json.loads(a.engine_args),
                             os.path.join(a.out_dir, f"{tag}_{a.variant}_server.log"))
     try:
-        await wait_healthy(url, proc)
+        try:
+            await wait_healthy(url, proc)
+        except RuntimeError:
+            log_path = os.path.join(a.out_dir, f"{tag}_{a.variant}_server.log")
+            try:
+                with open(log_path) as f:
+                    tail = f.readlines()[-40:]
+                print(f"[server] failed to start; last lines of {log_path}:\n" + "".join(tail), flush=True)
+            except OSError:
+                pass
+            raise
         print("[server] healthy", flush=True)
         for n in [int(x) for x in a.agents.split(",")]:
             prefix = os.path.join(a.out_dir, f"{tag}_{a.variant}_n{n}")
