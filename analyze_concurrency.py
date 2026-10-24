@@ -68,7 +68,11 @@ def main():
     print("when preemptions start, and peak cache use. 'reuse' = share of prompt tokens served from cache.")
 
     if a.plot:
-        import matplotlib
+        try:
+            import matplotlib
+        except ImportError:
+            print("matplotlib not installed; skipping the plot")
+            return
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         groups = defaultdict(list)

@@ -55,7 +55,20 @@ def engine_args_to_cli(engine_args):
     return out
 
 
+ENGINE = "vllm"   # set from --engine in main(); "vllm" or "sglang"
+
+
 def start_server(model, port, max_len, gpu_util, engine_args, log_path):
+    if ENGINE == "sglang":
+        # Run from the SGLang environment. --enable-metrics exposes /metrics.
+        cmd = [sys.executable, "-m", "sglang.launch_server", "--model-path", model, "--host", "127.0.0.1",
+               "--port", str(port), "--context-length", str(max_len), "--mem-fraction-static", str(gpu_util),
+               "--served-model-name", "bench", "--trust-remote-code", "--enable-metrics"] + engine_args_to_cli(engine_args)
+        env = dict(os.environ)
+        env.setdefault("SGLANG_ENABLE_JIT_DEEPGEMM", "0")  # DeepGEMM needs NVCC >= 12.9
+        print("[server] " + " ".join(shlex.quote(c) for c in cmd), flush=True)
+        log = open(log_path, "w")
+        return subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env)
     cmd = ["vllm", "serve", model, "--port", str(port), "--max-model-len", str(max_len),
            "--gpu-memory-utilization", str(gpu_util), "--enable-prefix-caching",
            "--enable-prompt-tokens-details", "--served-model-name", "bench",
@@ -95,6 +108,19 @@ METRIC_KEYS = {
     "ttft_sum": re.compile(r"^vllm:time_to_first_token_seconds_sum\b"),
     "ttft_count": re.compile(r"^vllm:time_to_first_token_seconds_count\b"),
 }
+# SGLang names the same quantities differently (server started with --enable-metrics).
+SGL_METRIC_KEYS = {
+    "cache_usage": re.compile(r"^sglang:token_usage\b"),
+    "mamba_usage": re.compile(r"^sglang:\w*mamba\w*usage\w*\b"),
+    "running": re.compile(r"^sglang:num_running_reqs\b"),
+    "waiting": re.compile(r"^sglang:num_queue_reqs\b"),
+    "preemptions": re.compile(r"^sglang:num_retracted_reqs(_total)?\b"),
+    "sgl_cache_hit_rate": re.compile(r"^sglang:cache_hit_rate\b"),
+    "prompt_tokens": re.compile(r"^sglang:prompt_tokens(_total)?\b"),
+    "gen_tokens": re.compile(r"^sglang:generation_tokens(_total)?\b"),
+    "ttft_sum": re.compile(r"^sglang:time_to_first_token_seconds_sum\b"),
+    "ttft_count": re.compile(r"^sglang:time_to_first_token_seconds_count\b"),
+}
 
 
 def parse_metrics(text):
@@ -102,7 +128,7 @@ def parse_metrics(text):
     for line in text.splitlines():
         if not line or line.startswith("#"):
             continue
-        for key, rx in METRIC_KEYS.items():
+        for key, rx in (SGL_METRIC_KEYS if ENGINE == "sglang" else METRIC_KEYS).items():
             if rx.match(line):
                 try:
                     vals[key] = vals.get(key, 0.0) + float(line.rsplit(" ", 1)[1])
@@ -181,11 +207,19 @@ async def agent(aid, a, url, session, system, vocab, max_ctx, req_rows, job_rows
     for turn in range(a.turns):
         if len(hist) + a.gen_len + 64 > max_ctx:
             break
-        body = {"model": "bench", "prompt": hist, "max_tokens": a.gen_len, "temperature": 0.0,
-                "ignore_eos": True, "return_token_ids": True}
+        if ENGINE == "sglang":
+            body = {"input_ids": hist, "sampling_params": {"max_new_tokens": a.gen_len, "temperature": 0.0,
+                                                           "ignore_eos": True}}
+            if warn.get("logprob_ids"):
+                body.update({"return_logprob": True, "logprob_start_len": -1, "top_logprobs_num": 0})
+            path = "/generate"
+        else:
+            body = {"model": "bench", "prompt": hist, "max_tokens": a.gen_len, "temperature": 0.0,
+                    "ignore_eos": True, "return_token_ids": True}
+            path = "/v1/completions"
         ts = time.time()
         try:
-            async with session.post(url + "/v1/completions", json=body,
+            async with session.post(url + path, json=body,
                                     timeout=aiohttp.ClientTimeout(total=a.request_timeout)) as r:
                 data = await r.json()
                 status = r.status
@@ -198,16 +232,32 @@ async def agent(aid, a, url, session, system, vocab, max_ctx, req_rows, job_rows
             req_rows.append({"agent": aid, "turn": turn, "prompt_len": len(hist), "status": f"http{status}",
                              "latency_s": round(lat, 3), "start_s": round(ts - t0, 2)})
             break
-        ch = data["choices"][0]
-        gen = ch.get("token_ids")
+        if ENGINE == "sglang":
+            if isinstance(data, list):
+                data = data[0]
+            meta = data.get("meta_info") or {}
+            gen = data.get("output_ids") or meta.get("output_ids")
+            if not gen and meta.get("output_token_logprobs"):
+                gen = [t[1] for t in meta["output_token_logprobs"]]
+            if not gen and not warn.get("logprob_ids"):
+                warn["logprob_ids"] = True   # ask for token ids through logprobs from now on
+                print("[info] /generate returned no output_ids; requesting token ids via logprobs", file=sys.stderr)
+            cached_sgl = meta.get("cached_tokens")
+        else:
+            ch = data["choices"][0]
+            gen = ch.get("token_ids")
+            cached_sgl = None
         if not gen:
             if not warn.get("ids"):
                 print("[warn] server did not return token_ids; appending placeholder tokens "
                       "(prefix reuse of the model's own reply will be understated)", file=sys.stderr)
                 warn["ids"] = True
             gen = rng.toks(a.gen_len)
-        usage = data.get("usage") or {}
-        cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+        if ENGINE == "sglang":
+            cached = cached_sgl
+        else:
+            usage = data.get("usage") or {}
+            cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
         req_rows.append({"agent": aid, "turn": turn, "prompt_len": len(hist), "status": "ok",
                          "cached_tokens": cached if cached is not None else "",
                          "latency_s": round(lat, 3), "start_s": round(ts - t0, 2)})
@@ -225,12 +275,26 @@ async def run_load(a, url, n_agents, vocab, out_prefix):
     system = [seed_rng.randrange(1000, max(1001, min(vocab, 100000) - 1000)) for _ in range(a.sys_len)]
     try:  # start every run with an empty prefix cache
         async with aiohttp.ClientSession() as s:
-            async with s.post(url + "/reset_prefix_cache", timeout=aiohttp.ClientTimeout(total=30)) as r:
+            reset = "/flush_cache" if ENGINE == "sglang" else "/reset_prefix_cache"
+            async with s.post(url + reset, timeout=aiohttp.ClientTimeout(total=30)) as r:
                 pass
     except Exception:
         pass
     before = await scrape_once(url)
     req_rows, job_rows, met_rows, warn = [], [], [], {}
+    if ENGINE == "sglang":  # find out once whether /generate returns token ids, before agents start
+        try:
+            async with aiohttp.ClientSession() as s:
+                body = {"input_ids": system[:32], "sampling_params": {"max_new_tokens": 4, "temperature": 0.0,
+                                                                     "ignore_eos": True}}
+                async with s.post(url + "/generate", json=body, timeout=aiohttp.ClientTimeout(total=120)) as r:
+                    d = await r.json()
+                d = d[0] if isinstance(d, list) else d
+                if not (d.get("output_ids") or (d.get("meta_info") or {}).get("output_ids")):
+                    warn["logprob_ids"] = True
+                    print("[info] /generate returns no output_ids; using logprobs to get token ids", flush=True)
+        except Exception as e:
+            print(f"[warn] SGLang probe request failed: {e}", file=sys.stderr)
     stop = asyncio.Event()
     t0 = time.time()
     samp = asyncio.create_task(sampler(url, t0, met_rows, stop))
@@ -364,6 +428,8 @@ async def amain(a):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--engine", choices=["vllm", "sglang"], default="vllm",
+                    help="sglang: run from the SGLang environment; engine args go to sglang.launch_server")
     ap.add_argument("--model", required=True)
     ap.add_argument("--tag", help="short name used in output files")
     ap.add_argument("--variant", default="default")
@@ -382,7 +448,8 @@ def main():
     ap.add_argument("--tool-min-s", type=float, default=0.2)
     ap.add_argument("--tool-max-s", type=float, default=30.0)
     ap.add_argument("--max-model-len", type=int, default=32768)
-    ap.add_argument("--gpu-util", type=float, default=0.85)
+    ap.add_argument("--gpu-util", type=float, default=0.85,
+                    help="vLLM gpu_memory_utilization, or SGLang mem_fraction_static")
     ap.add_argument("--request-timeout", type=float, default=300)
     ap.add_argument("--run-timeout", type=float, default=1200)
     ap.add_argument("--stagger-s", type=float, default=10.0, help="spread agent start times over this many seconds")
@@ -393,6 +460,8 @@ def main():
     ap.add_argument("--vocab", type=int, help="skip loading the tokenizer (testing)")
     ap.add_argument("--out-dir", required=True)
     a = ap.parse_args()
+    global ENGINE
+    ENGINE = a.engine
     asyncio.run(amain(a))
 
 

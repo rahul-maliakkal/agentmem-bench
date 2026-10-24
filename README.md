@@ -28,7 +28,7 @@ Tested on one NVIDIA H100 80GB (PCIe Gen5), vLLM 0.32, SGLang 0.5.22.
 | 3 | Offload a paused session to CPU, or rebuild it? | `transfer_bench.py`, `prefill_bench.py` | `run_all.sh` |
 | 4–5 | How much work is repeated when an agent resumes (vLLM default and align modes)? | `multiturn_bench.py` | `run_multiturn.sh` |
 | 6 | Same, on SGLang (exact and every-256-token checkpoints) | `sglang_multiturn.py` | `run_sglang.sh` |
-| 7 | How many concurrent agents does one GPU serve? | `concurrency_bench.py` | `run_concurrency.sh` |
+| 7 | How many concurrent agents does one GPU serve? (vLLM; `--engine sglang` for SGLang) | `concurrency_bench.py` | `run_concurrency.sh`, `run_sglang_concurrency.sh` |
 | 8 | How many paused sessions keep their resume point as the cache fills? | `retention_bench.py` | `run_checkpoint.sh` |
 
 `run_pending.sh` runs experiments 4–7 back to back. Every runner skips work that already
