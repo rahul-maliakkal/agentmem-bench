@@ -417,7 +417,7 @@ async def amain(a):
                             os.path.join(a.out_dir, f"{tag}_{a.variant}_server.log"))
     try:
         try:
-            await wait_healthy(url, proc)
+            await wait_healthy(url, proc, timeout=a.startup_timeout)
         except RuntimeError:
             log_path = os.path.join(a.out_dir, f"{tag}_{a.variant}_server.log")
             try:
@@ -483,6 +483,8 @@ def main():
                     help="stop a load level if no model call finishes for this many seconds")
     ap.add_argument("--redo", action="store_true", help="rerun load levels that already have results")
     ap.add_argument("--vocab", type=int, help="skip loading the tokenizer (testing)")
+    ap.add_argument("--startup-timeout", type=float, default=2400,
+                    help="seconds to wait for the server to start (large models load slowly)")
     ap.add_argument("--trace", help="replay real agent sessions from prepare_traces.py (agent i uses session i mod n)")
     ap.add_argument("--out-dir", required=True)
     a = ap.parse_args()
