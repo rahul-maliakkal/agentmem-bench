@@ -9,7 +9,15 @@ grep -q "HF_HOME=/workspace/hf" ~/.bashrc 2>/dev/null || echo 'export HF_HOME=/w
 
 python -m pip install -U pip
 # vLLM pins compatible torch / transformers / huggingface_hub. Do NOT upgrade those separately.
-python -c "import vllm" 2>/dev/null || python -m pip install -U vllm
+# Some images ship OS-installed Python packages (e.g. PyJWT, blinker) that pip cannot uninstall
+# ("no RECORD file"). Installing over them with --ignore-installed avoids that error.
+if ! python -c "import vllm" 2>/dev/null; then
+  python -m pip install -U vllm || {
+    echo "[setup] retrying with OS-installed packages overridden"
+    python -m pip install --ignore-installed PyJWT blinker
+    python -m pip install -U vllm
+  }
+fi
 python -m pip install matplotlib
 
 # Repair a too-new huggingface_hub (e.g. from an earlier run of this script):
