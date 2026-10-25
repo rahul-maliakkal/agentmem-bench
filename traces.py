@@ -57,3 +57,37 @@ def describe(system, sessions):
     return (f"trace: {len(sessions)} sessions; system prompt {len(system)} tokens; turns median {med(t)} "
             f"(p90 {p90(t)}); reply tokens median {med(g)} (p90 {p90(g)}); tool output tokens median {med(o)} "
             f"(p90 {p90(o)}); final context median {med(f)} (p90 {p90(f)})")
+
+
+def load_paused_prefixes(path, tokenizer, n, seed=0, min_prefix=1500, max_prefix=24000, reply_min=16,
+                         reply_max=2048):
+    """Real agent sessions cut at a random turn, for the retention experiment.
+
+    Each item is {"prefix": task + recorded replies and tool outputs up to the cut,
+    "gen_len": length of the recorded reply at the cut, "tool": the tool output that follows}.
+    The shared system prompt is returned separately. Sessions are distinct, so their private
+    parts never share cache entries.
+    """
+    import random
+    with open(path) as f:
+        tr = json.load(f)
+    rng = random.Random(seed)
+    system = encode(tokenizer, tr["system"])
+    out = []
+    for s in tr["sessions"]:
+        if len(out) >= n:
+            break
+        ids = encode(tokenizer, s["task"])
+        cuts = []  # (prefix ids, gen_len, next tool ids) for every turn that could be the pause point
+        for t in s["turns"]:
+            r = encode(tokenizer, t["reply"])
+            tool = encode(tokenizer, t["tool"])
+            if len(system) + len(ids) >= min_prefix:
+                cuts.append((list(ids), min(reply_max, max(reply_min, len(r))), tool))
+            ids = ids + r + tool
+            if len(system) + len(ids) > max_prefix:
+                break
+        if cuts:
+            p, g, tool = rng.choice(cuts)
+            out.append({"prefix": p, "gen_len": g, "tool": tool})
+    return system, out

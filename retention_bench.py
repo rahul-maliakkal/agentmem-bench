@@ -66,7 +66,8 @@ class VllmEngine:
                     enable_prefix_caching=True, trust_remote_code=True)
         args.update(engine_args)
         self.llm = LLM(**args)
-        self.vocab = self.llm.get_tokenizer().vocab_size
+        self.tokenizer = self.llm.get_tokenizer()
+        self.vocab = self.tokenizer.vocab_size
 
     def info(self):
         out = {}
@@ -78,7 +79,8 @@ class VllmEngine:
         return out
 
     def generate(self, prompts, max_tokens):
-        sp = self.SP(max_tokens=max_tokens, temperature=0.0, ignore_eos=True)
+        mts = max_tokens if isinstance(max_tokens, list) else [max_tokens] * len(prompts)
+        sp = [self.SP(max_tokens=m, temperature=0.0, ignore_eos=True) for m in mts]
         outs = self.llm.generate([self.TP(prompt_token_ids=p) for p in prompts], sp, use_tqdm=False)
         return [(list(o.outputs[0].token_ids), getattr(o, "num_cached_tokens", None)) for o in outs]
 
@@ -134,7 +136,8 @@ class SglEngine:
         args.update(engine_args)
         self.llm = sgl.Engine(**args)
         from transformers import AutoTokenizer
-        self.vocab = AutoTokenizer.from_pretrained(model, trust_remote_code=True).vocab_size
+        self.tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
+        self.vocab = self.tokenizer.vocab_size
 
     def info(self):
         try:
@@ -150,16 +153,17 @@ class SglEngine:
             return {}
 
     def generate(self, prompts, max_tokens):
-        sp = {"max_new_tokens": max_tokens, "temperature": 0.0, "ignore_eos": True}
+        mts = max_tokens if isinstance(max_tokens, list) else [max_tokens] * len(prompts)
+        sp = [{"max_new_tokens": m, "temperature": 0.0, "ignore_eos": True} for m in mts]
         outs = self.llm.generate(input_ids=prompts, sampling_params=sp)
         if isinstance(outs, dict):
             outs = [outs]
         res = []
-        for o in outs:
+        for o, m in zip(outs, mts):
             meta = o.get("meta_info", {})
             gen = o.get("output_ids") or meta.get("output_ids") or []
-            if len(gen) != max_tokens:
-                gen = gen or [7] * max_tokens
+            if len(gen) != m:
+                gen = gen or [7] * m
             res.append((list(gen), meta.get("cached_tokens")))
         return res
 
@@ -187,14 +191,15 @@ class FakeEngine:
 
     def __init__(self, slots=100):
         from collections import OrderedDict
-        self.vocab, self.slots, self.cache = 150000, slots, OrderedDict()
+        self.vocab, self.slots, self.cache, self.tokenizer = 150000, slots, OrderedDict(), None
 
     def info(self):
         return {"slots": self.slots}
 
     def generate(self, prompts, max_tokens):
         res = []
-        for p in prompts:
+        mts = max_tokens if isinstance(max_tokens, list) else [max_tokens] * len(prompts)
+        for p, max_tokens in zip(prompts, mts):
             cached = 0
             for k in list(self.cache):
                 if len(k) <= len(p) and tuple(p[:len(k)]) == k and len(k) > cached:
@@ -234,6 +239,8 @@ def main():
     ap.add_argument("--resume-batch", type=int, default=16, help="sessions resumed together in phase 2")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--trace", help="pause real agent sessions (prepare_traces.py output) at a random turn "
+                                    "instead of synthetic ones; needs at least max(--sessions-list) sessions")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
@@ -250,19 +257,40 @@ def main():
 
     toks = Tokens(eng.vocab, a.seed)
     system = toks.take(a.sys_len)
+    paused = None
+    if a.trace:
+        from traces import load_paused_prefixes
+        nmax = max(int(x) for x in a.sessions_list.split(","))
+        system, paused = load_paused_prefixes(a.trace, eng.tokenizer, nmax, a.seed)
+        a.sys_len = len(system)
+        lens = sorted(len(system) + len(p["prefix"]) for p in paused)
+        print(f"[info] real sessions: {len(paused)} paused; system prompt {len(system)} tokens; paused context "
+              f"median {lens[len(lens) // 2]}, p90 {lens[int(0.9 * (len(lens) - 1))]}", flush=True)
+        if len(paused) < nmax:
+            print(f"[warn] only {len(paused)} distinct sessions; larger N levels are skipped", file=sys.stderr)
     eng.generate([Tokens(eng.vocab, 999).take(256)], 4)  # warmup
 
     rows, summary = [], []
     for n in [int(x) for x in a.sessions_list.split(",")]:
         flushed = eng.flush()
         t0 = time.time()
-        tasks = [toks.take(a.task_len) for _ in range(n)]
-        prompts = [system + t for t in tasks]
+        if paused is not None:
+            if n > len(paused):
+                continue
+            prompts = [system + p["prefix"] for p in paused[:n]]
+            gens = [p["gen_len"] for p in paused[:n]]
+            tools = [p["tool"] for p in paused[:n]]
+        else:
+            tasks = [toks.take(a.task_len) for _ in range(n)]
+            prompts = [system + t for t in tasks]
+            gens = [a.gen_len] * n
+            tools = None
         replies = []
         for i in range(0, n, a.pause_batch):                       # phase 1: pause N sessions
-            replies += [g for g, _ in eng.generate(prompts[i:i + a.pause_batch], a.gen_len)]
+            replies += [g for g, _ in eng.generate(prompts[i:i + a.pause_batch], gens[i:i + a.pause_batch])]
         snap = eng.cache_snapshot()
-        tools = [toks.take(a.tool_len) for _ in range(n)]
+        if tools is None:
+            tools = [toks.take(a.tool_len) for _ in range(n)]
         res = []
         for i in range(0, n, a.resume_batch):                      # phase 2: resume, oldest first
             batch = [prompts[j] + replies[j] + tools[j] for j in range(i, min(n, i + a.resume_batch))]
@@ -278,7 +306,7 @@ def main():
             kf, kp, ks = c >= reusable - 16, c >= len(prompts[j]) - 16, c >= a.sys_len - 16
             kept_full += kf; kept_prompt += kp; kept_sys += ks
             fracs.append(min(1.0, c / reusable))
-            recomputed.append(reusable + a.tool_len - c)
+            recomputed.append(reusable + len(tools[j]) - c)
             rows.append({"model": a.model, "variant": a.variant, "engine": eng.name, "n_sessions": n,
                          "session": j, "reusable": reusable, "cached": c, "kept_full": int(kf),
                          "kept_prompt": int(kp), "kept_sys": int(ks)})

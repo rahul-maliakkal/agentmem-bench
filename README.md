@@ -35,7 +35,9 @@ Tested on one NVIDIA H100 80GB (PCIe Gen5), vLLM 0.32, SGLang 0.5.22.
 SWE-agent runs (Claude 3.7 Sonnet on SWE-smith tasks, [SWE-smith trajectories](https://huggingface.co/datasets/SWE-bench/SWE-smith-trajectories), MIT).
 `prepare_traces.py` keeps the real system prompt, task and tool outputs and the length of each
 reply; the benchmarks then let the model generate replies of those lengths (`--trace`). Tool
-pause times are not in the traces and stay simulated.
+pause times are not in the traces and stay simulated. `run_coding_agents.sh` adds the
+large pair (Devstral vs Nemotron) to experiment 7, experiment 8 with real sessions paused at a
+random turn (`retention_bench.py --trace`), and experiment 7 on SGLang, all on SWE-agent sessions.
 
 `run_pending.sh` runs experiments 4–7 back to back. Every runner skips work that already
 has results, so it is safe to restart.
