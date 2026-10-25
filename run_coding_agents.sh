@@ -14,7 +14,7 @@ export HF_HOME=${HF_HOME:-/workspace/hf}
 STEPS=${STEPS:-"1 2 4 3 5"}
 mkdir -p results/logs results/traces/conc results/traces/conc_sgl traces
 TRACE=traces/swe_smith.json          # 256 sessions (built by run_traces.sh)
-TRACE1K=traces/swe_smith_1k.json     # 1,100 sessions, for up to 1,024 paused sessions
+TRACE1K=traces/swe_smith_1500.json   # 1,500 sessions, so 1,024 still fit after dropping over-long ones
 FINE='{"mamba_cache_mode":"align","prefix_match_unit":16}'
 NOBUF='{"mamba_radix_cache_strategy":"no_buffer","disable_overlap_schedule":true}'
 BF16='{"mamba_ssm_dtype":"bfloat16"}'
@@ -27,7 +27,7 @@ if ! python -c "from vllm import LLM" 2>results/logs/vllm_check.log; then
 fi
 python -c "import pyarrow, huggingface_hub" 2>/dev/null || pip install -q pyarrow huggingface_hub
 [ -s "$TRACE" ] || python prepare_traces.py --out "$TRACE" | tee results/traces/prepare.log
-[ -s "$TRACE1K" ] || python prepare_traces.py --n 1100 --out "$TRACE1K" | tee results/traces/prepare_1k.log
+[ -s "$TRACE1K" ] || python prepare_traces.py --n 1500 --out "$TRACE1K" | tee results/traces/prepare_1500.log
 
 # ---- 1. agents per GPU, large pair, vLLM
 if has 1; then

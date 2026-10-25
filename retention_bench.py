@@ -261,7 +261,7 @@ def main():
     if a.trace:
         from traces import load_paused_prefixes
         nmax = max(int(x) for x in a.sessions_list.split(","))
-        system, paused = load_paused_prefixes(a.trace, eng.tokenizer, nmax, a.seed)
+        system, paused = load_paused_prefixes(a.trace, eng.tokenizer, nmax, a.seed, max_ctx=a.max_model_len)
         a.sys_len = len(system)
         lens = sorted(len(system) + len(p["prefix"]) for p in paused)
         print(f"[info] real sessions: {len(paused)} paused; system prompt {len(system)} tokens; paused context "

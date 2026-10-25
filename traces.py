@@ -60,7 +60,7 @@ def describe(system, sessions):
 
 
 def load_paused_prefixes(path, tokenizer, n, seed=0, min_prefix=1500, max_prefix=24000, reply_min=16,
-                         reply_max=2048):
+                         reply_max=2048, max_ctx=32768, margin=256):
     """Real agent sessions cut at a random turn, for the retention experiment.
 
     Each item is {"prefix": task + recorded replies and tool outputs up to the cut,
@@ -82,8 +82,10 @@ def load_paused_prefixes(path, tokenizer, n, seed=0, min_prefix=1500, max_prefix
         for t in s["turns"]:
             r = encode(tokenizer, t["reply"])
             tool = encode(tokenizer, t["tool"])
-            if len(system) + len(ids) >= min_prefix:
-                cuts.append((list(ids), min(reply_max, max(reply_min, len(r))), tool))
+            g = min(reply_max, max(reply_min, len(r)))
+            # the resumed request (prefix + reply + next tool output) must fit in the context window
+            if len(system) + len(ids) >= min_prefix and len(system) + len(ids) + g + len(tool) + margin <= max_ctx:
+                cuts.append((list(ids), g, tool))
             ids = ids + r + tool
             if len(system) + len(ids) > max_prefix:
                 break
