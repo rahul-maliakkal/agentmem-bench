@@ -6,15 +6,18 @@
 #   3. Longer sessions: memory per session at 64K and 128K tokens                         (~20 min)
 #   4. Tool-pause sweep: agents per GPU with median tool pauses of 1, 10 and 30 s          (~2 h)
 #   5. Memory-budget sweep: paused-session retention with less GPU memory                  (~40 min)
+#   6. Model check: paused-session retention on a fine grid around the capacity the memory
+#      rule predicts (dense Granite-Micro 65, Granite-H-Micro 469, Devstral 17, Nemotron 357) (~1 h)
+# Default order: 1 6 2 3 4 5
 # Run inside tmux, from the vLLM environment:  tmux new -s final ; bash run_final.sh
 # Set STEPS="2 3" to run only some steps. Finished pieces are skipped on restart.
 set -uo pipefail
 cd "$(dirname "$0")"
 export HF_HOME=${HF_HOME:-/workspace/hf}
 export SGLANG_ENABLE_JIT_DEEPGEMM=${SGLANG_ENABLE_JIT_DEEPGEMM:-0}
-STEPS=${STEPS:-"1 2 3 4 5"}
+STEPS=${STEPS:-"1 6 2 3 4 5"}
 has() { case " $STEPS " in *" $1 "*) return 0;; *) return 1;; esac; }
-mkdir -p results/logs results/accuracy results/branch results/capacity_long results/traces/conc_pause results/traces/ret_mem
+mkdir -p results/traces/ret_fine results/logs results/accuracy results/branch results/capacity_long results/traces/conc_pause results/traces/ret_mem
 TRACE=traces/swe_smith.json; TRACE1K=traces/swe_smith_1500.json
 FINE='{"mamba_cache_mode":"align","prefix_match_unit":16}'
 NOBUF='{"mamba_radix_cache_strategy":"no_buffer","disable_overlap_schedule":true}'
@@ -62,6 +65,19 @@ if has 1; then
   else echo "[skip] SGLang accuracy: no /workspace/sgl"; fi
   stop
   python analyze_accuracy.py results/accuracy | tee results/accuracy/summary.txt
+fi
+
+# ---- 6. model check: retention on a fine grid around the predicted capacity (vLLM default)
+if has 6; then
+  for m in "granite_micro_dense|$GM|40,48,56,64,72,80,96" "granite_hmicro|$GHM|320,384,416,448,480,512,576" \
+           "devstral24b_dense|$DEV|8,12,16,20,24,28" "nemo3_nano30b|$NEMO|256,288,320,352,384,416,448"; do
+    IFS='|' read -r name hf grid <<< "$m"; out="results/traces/ret_fine/ret_${name}_fine.csv"
+    if [ -s "${out%.csv}_summary.json" ]; then echo "[skip] fine retention $name"; continue; fi
+    echo; echo "======== [6] retention, fine grid ($grid): $name ========"
+    stop
+    python retention_bench.py --engine vllm --model "$hf" --variant default --engine-args '{}' --trace "$TRACE1K" \
+      --sessions-list "$grid" --out "$out" 2>&1 | tee "results/logs/ret_fine_${name}.log" | grep -E "^N=|\[info\]|Error|error|wrote" || true
+  done
 fi
 
 # ---- 2. branching agents
@@ -133,5 +149,5 @@ if has 5; then
   done
 fi
 stop
-tar czf results_final.tar.gz results/accuracy results/branch results/capacity_long results/traces/conc_pause results/traces/ret_mem results/logs 2>/dev/null
+tar czf results_final.tar.gz results/traces/ret_fine results/accuracy results/branch results/capacity_long results/traces/conc_pause results/traces/ret_mem results/logs 2>/dev/null
 echo "Done. Download results_final.tar.gz"
