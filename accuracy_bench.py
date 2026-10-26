@@ -231,6 +231,23 @@ async def bench(a, tok):
             summary["gsm8k"] = {"n": n, "correct": correct, "errors": errs, "accuracy": round(correct / n, 4) if n else None,
                                 "stderr": round(se, 4), "wall_s": round(time.time() - t0, 1)}
             print("[gsm8k]", summary["gsm8k"], flush=True)
+
+        if "greedy" in a.tasks:
+            # Greedy continuations of real agent prompts, saved for output-equality checks across settings
+            # (e.g., 32- vs 16-bit recurrent state, and a 32-bit rerun as the nondeterminism baseline).
+            items = replay_items(a.trace, tok, a.greedy_n, a.seed + 1, a.max_prompt)
+            t0 = time.time()
+            outs = await run_all(lambda it: generate(s, url, a.engine, it[0], a.greedy_tokens), items, a.concurrency)
+            errs = 0
+            with open(stem + "_greedy.jsonl", "w") as f:
+                for i, o in enumerate(outs):
+                    if isinstance(o, Exception):
+                        errs += 1
+                        o = None
+                    f.write(json.dumps({"item": i, "prompt_tokens": len(items[i][0]), "text": o}) + "\n")
+            summary["greedy"] = {"n": len(items), "errors": errs, "max_tokens": a.greedy_tokens,
+                                 "wall_s": round(time.time() - t0, 1)}
+            print("[greedy]", summary["greedy"], flush=True)
     with open(stem + "_summary.json", "w") as f:
         json.dump(summary, f, indent=2)
     return summary
@@ -243,7 +260,9 @@ def main():
     ap.add_argument("--tag", required=True)
     ap.add_argument("--variant", default="default")
     ap.add_argument("--engine-args", default="{}")
-    ap.add_argument("--tasks", default="replay,gsm8k")
+    ap.add_argument("--tasks", default="replay,gsm8k,greedy")
+    ap.add_argument("--greedy-n", type=int, default=200)
+    ap.add_argument("--greedy-tokens", type=int, default=256)
     ap.add_argument("--trace", default="traces/swe_smith_1500.json")
     ap.add_argument("--replay-n", type=int, default=300)
     ap.add_argument("--max-prompt", type=int, default=12000)
