@@ -24,7 +24,15 @@ NOBUF='{"mamba_radix_cache_strategy":"no_buffer","disable_overlap_schedule":true
 BF16='{"mamba_ssm_dtype":"bfloat16"}'
 G1=ibm-granite/granite-4.0-1b; GH1=ibm-granite/granite-4.0-h-1b; GM=ibm-granite/granite-4.0-micro; GHM=ibm-granite/granite-4.0-h-micro
 DEV=mistralai/Devstral-Small-2-24B-Instruct-2512; NEMO=nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8
-stop() { pkill -f "vllm serve" 2>/dev/null; pkill -f EngineCore 2>/dev/null; pkill -f "sglang.launch_server|sglang::" 2>/dev/null; sleep 8; }
+stop() {  # kill any server and wait until the GPU memory is actually released (up to 3 minutes)
+  pkill -f "vllm serve" 2>/dev/null; pkill -f EngineCore 2>/dev/null; pkill -f "sglang.launch_server|sglang::" 2>/dev/null
+  for _ in $(seq 1 36); do
+    used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1)
+    [ -n "$used" ] && [ "$used" -lt 2000 ] && return 0
+    sleep 5; pkill -9 -f "vllm serve|EngineCore|sglang::|sglang.launch_server" 2>/dev/null
+  done
+  echo "[warn] GPU still has ${used:-?} MiB in use after 3 minutes"; nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
+}
 
 if ! python -c "from vllm import LLM" 2>results/logs/vllm_check.log; then
   echo "ERROR: vLLM does not import with $(which python):"; tail -5 results/logs/vllm_check.log; exit 1
