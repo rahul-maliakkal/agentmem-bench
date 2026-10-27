@@ -38,20 +38,26 @@ import concurrency_bench as cb
 
 # ---------------------------------------------------------------- prompts
 def chat_ids(tok, messages, add_generation_prompt):
-    """Token ids of a chat. Falls back to plain text if the tokenizer has no chat template."""
+    """Token ids of a chat. Renders the chat template to text, then tokenizes it, so the result is
+    always a flat list of ints whatever apply_chat_template returns in this transformers version.
+    Falls back to plain text if the tokenizer has no chat template."""
+    text = None
     if getattr(tok, "chat_template", None):
         for kw in ({"enable_thinking": False}, {}):
             try:
-                out = tok.apply_chat_template(messages, tokenize=True, add_generation_prompt=add_generation_prompt, **kw)
-                if isinstance(out, dict):
-                    out = out["input_ids"]
-                return list(out)
+                text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt, **kw)
+                break
             except TypeError:
                 continue
             except Exception:
                 break
-    text = "".join(f"<{m['role']}>\n{m['content']}\n" for m in messages) + ("<assistant>\n" if add_generation_prompt else "")
-    return list(tok.encode(text, add_special_tokens=False))
+    if not isinstance(text, str):
+        text = "".join(f"<{m['role']}>\n{m['content']}\n" for m in messages) + ("<assistant>\n" if add_generation_prompt else "")
+    ids = tok.encode(text, add_special_tokens=False)
+    if hasattr(ids, "keys"):
+        ids = ids["input_ids"]
+    ids = [int(x) for x in ids]
+    return ids
 
 
 def replay_items(trace_path, tok, n, seed, max_prompt):
@@ -179,6 +185,9 @@ async def bench(a, tok):
     async with aiohttp.ClientSession() as s:
         if "replay" in a.tasks:
             items = replay_items(a.trace, tok, a.replay_n, a.seed, a.max_prompt)
+            med = statistics.median(len(p) for p, _, _ in items)
+            if med < 100:
+                sys.exit(f"[error] replay prompts look broken (median {med} tokens); not writing results")
             print(f"[replay] {len(items)} (session, turn) pairs; prompt median "
                   f"{int(statistics.median(len(p) for p, _, _ in items))} tokens", flush=True)
             t0 = time.time()
@@ -211,6 +220,8 @@ async def bench(a, tok):
             qs = load_gsm8k(a.gsm8k_n, a.seed)
             prompts = [chat_ids(tok, [{"role": "user", "content": q + "\n\nSolve step by step, then finish with "
                                        "'The answer is <number>.'"}], add_generation_prompt=True) for q, _ in qs]
+            if statistics.median(len(p) for p in prompts) < 30:
+                sys.exit("[error] GSM8K prompts look broken; not writing results")
             t0 = time.time()
             outs = await run_all(lambda p: generate(s, url, a.engine, p, a.gsm8k_max_tokens), prompts, a.concurrency)
             rows, correct, errs = [], 0, 0
