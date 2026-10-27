@@ -37,7 +37,8 @@ stop() {  # kill any server and wait until the GPU memory is actually released (
 if ! python -c "from vllm import LLM" 2>results/logs/vllm_check.log; then
   echo "ERROR: vLLM does not import with $(which python):"; tail -5 results/logs/vllm_check.log; exit 1
 fi
-python -c "import pandas, pyarrow, huggingface_hub, transformers" 2>/dev/null || pip install -q pandas pyarrow huggingface_hub transformers
+python -c "import pandas, pyarrow, huggingface_hub, transformers" 2>/dev/null || pip install -q pandas pyarrow huggingface_hub "transformers<5"
+python -c "import vllm, transformers, torch; print('versions: vllm', vllm.__version__, 'transformers', transformers.__version__, 'torch', torch.__version__)" | tee results/logs/versions_final.txt
 [ -s "$TRACE" ] || python prepare_traces.py --out "$TRACE" | tee results/logs/prepare.log
 [ -s "$TRACE1K" ] || python prepare_traces.py --n 1500 --out "$TRACE1K" | tee results/logs/prepare_1500.log
 python -c "from huggingface_hub import hf_hub_download as d; d('openai/gsm8k','main/test-00000-of-00001.parquet',repo_type='dataset')" \
@@ -59,7 +60,9 @@ acc() {  # engine name variant args hf tasks
 }
 if has 1; then
   for m in "granite_1b_dense|$G1" "granite_h1b|$GH1" "granite_micro_dense|$GM" "granite_hmicro|$GHM" "devstral24b_dense|$DEV" "nemo3_nano30b|$NEMO"; do
-    IFS='|' read -r name hf <<< "$m"; acc vllm "$name" vllm '{}' "$hf" replay,gsm8k
+    IFS='|' read -r name hf <<< "$m"
+    args='{}'; [ "$name" = nemo3_nano30b ] && args='{"max_num_seqs":256}'   # Nemotron: only ~467 Mamba state slots fit
+    acc vllm "$name" vllm "$args" "$hf" replay,gsm8k
   done
   if [ $SGL_OK = 1 ]; then
     sgl_on
