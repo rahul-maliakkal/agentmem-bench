@@ -25,11 +25,13 @@ import subprocess
 import sys
 
 CHILD = r"""
-import sys
+import json, sys
 from vllm import LLM
-LLM(model=sys.argv[1], max_model_len=int(sys.argv[2]),
-    gpu_memory_utilization=float(sys.argv[3]), enforce_eager=True,
-    enable_prefix_caching=False, trust_remote_code=True)
+args = dict(model=sys.argv[1], max_model_len=int(sys.argv[2]),
+            gpu_memory_utilization=float(sys.argv[3]), enforce_eager=True,
+            enable_prefix_caching=False, trust_remote_code=True)
+args.update(json.loads(sys.argv[4]) if len(sys.argv) > 4 else {})
+LLM(**args)
 print("CHILD_DONE", flush=True)
 """
 
@@ -39,8 +41,8 @@ RE_TOKENS = re.compile(r"GPU KV cache size:\s*([\d,]+)\s*tokens")
 RE_BLOCK = re.compile(r"Setting attention block size to (\d+) tokens")
 
 
-def run_one(model, length, util, logdir):
-    p = subprocess.run([sys.executable, "-c", CHILD, model, str(length), str(util)],
+def run_one(model, length, util, logdir, engine_args="{}"):
+    p = subprocess.run([sys.executable, "-c", CHILD, model, str(length), str(util), engine_args],
                        capture_output=True, text=True)
     log = p.stdout + p.stderr
     os.makedirs(logdir, exist_ok=True)
@@ -75,13 +77,14 @@ def main():
     ap.add_argument("--lengths", default="2048,4096,8192,16384,32768")
     ap.add_argument("--gpu-util", type=float, default=0.90)
     ap.add_argument("--logdir", default="results/logs")
+    ap.add_argument("--engine-args", default="{}", help="JSON of extra vLLM engine args (e.g. kv_cache_dtype)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
     rows = []
     for L in [int(x) for x in a.lengths.split(",")]:
         print(f"[run] {a.model} max_model_len={L}", flush=True)
-        r = run_one(a.model, L, a.gpu_util, a.logdir)
+        r = run_one(a.model, L, a.gpu_util, a.logdir, a.engine_args)
         if r:
             r["model"] = a.model
             rows.append(r)

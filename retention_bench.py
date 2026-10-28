@@ -292,6 +292,7 @@ def main():
         if tools is None:
             tools = [toks.take(a.tool_len) for _ in range(n)]
         res = []
+        t_resume = time.time()
         for i in range(0, n, a.resume_batch):                      # phase 2: resume, oldest first
             batch = [prompts[j] + replies[j] + tools[j] for j in range(i, min(n, i + a.resume_batch))]
             res += [c for _, c in eng.generate(batch, 1)]
@@ -316,7 +317,9 @@ def main():
              "pct_kept_prompt": round(100 * kept_prompt / m, 1), "pct_kept_sys": round(100 * kept_sys / m, 1),
              "mean_reused_frac": round(statistics.mean(fracs), 3) if fracs else None,
              "mean_recomputed": round(statistics.mean(recomputed)) if recomputed else None,
-             "wall_s": round(time.time() - t0, 1), **{f"cache_{k}": v for k, v in snap.items()}}
+             "wall_s": round(time.time() - t0, 1),
+             "resume_s": round(time.time() - t_resume, 2), "resume_ms_per_session": round(1000 * (time.time() - t_resume) / n, 1),
+             **{f"cache_{k}": v for k, v in snap.items()}}
         summary.append(s)
         print(f"N={n:5d}  resume point fully kept {s['pct_kept_full']:5.1f}%  prompt kept "
               f"{s['pct_kept_prompt']:5.1f}%  system prompt kept {s['pct_kept_sys']:5.1f}%  "

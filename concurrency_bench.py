@@ -50,6 +50,8 @@ def engine_args_to_cli(engine_args):
             out.append(flag)
         elif v is False or v is None:
             continue
+        elif isinstance(v, (dict, list)):
+            out += [flag, json.dumps(v)]
         else:
             out += [flag, str(v)]
     return out
