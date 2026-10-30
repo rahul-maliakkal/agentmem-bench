@@ -6,6 +6,9 @@
 #        including 16), paused-session test on a fine grid, and the single-session reuse replay.      (~6 h)
 #   3. Dense Granite-Micro with CPU offload of paused KV cache: paused-session test and agents per GPU. (~2 h)
 #   2. Fine-grid agents per GPU with two extra repeats (seeds 1, 2) around each crossover.           (~9 h)
+#   5. Close two gaps (~2-2.5 h): Devstral with FP8 KV at 24-48 agents on three seeds, and Nemotron at
+#      112/120/128 agents on five seeds. Each seed stops at its first agent count over the 10 s p90 target.
+#      Run alone with:  STEPS="5" bash run_round3.sh
 #   4. gpt-oss-20b accuracy (GSM8K, HumanEval, long-context needle, long replay).                    (~1 h)
 # Run inside tmux, from the vLLM environment:  tmux new -s r3 ; bash run_round3.sh
 # STEPS="1 3" runs only those steps. Finished pieces are skipped on restart.
@@ -76,10 +79,10 @@ cap() {  # name hf args
   python vllm_capacity.py --model "$2" --engine-args "$3" --gpu-util 0.85 --lengths 2048,4096,8192,16384,32768,65536,131072 \
     --logdir results/logs/r3_cap_$1 --out "$out" 2>&1 | tee results/logs/r3_cap_$1.log | grep -E "MiB|run|Error|error" || true
 }
-conc() {  # name hf args variant agents seed
+conc() {  # name hf args variant agents seed [stop_p90]
   echo; echo "======== agents per GPU: $1 / $4 (agents $5, seed $6) ========"; stop
   python concurrency_bench.py --model "$2" --tag "$1" --variant "$4" --engine-args "$3" --trace "$TRACE" --turns 20 \
-    --agents "$5" --seed "$6" --run-timeout 3600 --request-timeout 1800 --stall-s 600 --out-dir $OUT/conc \
+    --agents "$5" --seed "$6" --stop-p90 "${7:-0}" --run-timeout 3600 --request-timeout 1800 --stall-s 600 --out-dir $OUT/conc \
     2>&1 | tee -a results/logs/r3_conc_$1_$4.log | grep -E "agents|Error|error" || true
 }
 ret() {  # name hf args variant grid
@@ -150,6 +153,18 @@ if has 2; then
     pack
   done
   for seed in 1 2; do conc devstral24b_dense "$DEV" '{}' "trace_s$seed" 8,12,16,24 "$seed"; done
+  stop; pack
+fi
+
+# ---- 5. close two gaps: Devstral (FP8 KV) on three seeds; Nemotron at 112-128 on five seeds. Each seed stops
+#         at its first agent count over the 10 s p90 target (later counts would fail too).
+if has 5; then
+  conc devstral24b_fp8kv "$DEV" "$DEV_FP8KV" gap_s0 24,40,48 0 10      # seed 0 already has 8,16,32,64,128
+  for seed in 1 2; do conc devstral24b_fp8kv "$DEV" "$DEV_FP8KV" "gap_s$seed" 24,32,40,48 "$seed" 10; done
+  pack
+  conc nemo3_nano30b "$NEMO" '{}' gap_s0 112,120 0 10                  # seeds 0-2 already have 112 and/or 128
+  for seed in 1 2; do conc nemo3_nano30b "$NEMO" '{}' "gap_s$seed" 120 "$seed" 10; done
+  for seed in 3 4; do conc nemo3_nano30b "$NEMO" '{}' "gap_s$seed" 112,120,128 "$seed" 10; done
   stop; pack
 fi
 

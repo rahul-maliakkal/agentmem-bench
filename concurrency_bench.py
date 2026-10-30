@@ -444,6 +444,9 @@ async def amain(a):
             print(f"      turns/s {s['turns_per_s']}, p90 latency {s['latency_p90_s']} s, "
                   f"p90 job time {s['jct_p90_s']} s, preemptions {s['preemptions']}, "
                   f"peak cache {s['peak_cache_usage']}, unfinished {s['agents_unfinished']}", flush=True)
+            if a.stop_p90 and (s["latency_p90_s"] > a.stop_p90 or s["agents_unfinished"]):
+                print(f"      p90 {s['latency_p90_s']} s exceeds {a.stop_p90} s; skipping larger agent counts.", flush=True)
+                break
     finally:
         if proc is not None:
             proc.terminate()
@@ -484,6 +487,7 @@ def main():
     ap.add_argument("--stall-s", type=float, default=180,
                     help="stop a load level if no model call finishes for this many seconds")
     ap.add_argument("--redo", action="store_true", help="rerun load levels that already have results")
+    ap.add_argument("--stop-p90", type=float, default=0, help="stop at the first agent count whose p90 latency exceeds this (0 = never)")
     ap.add_argument("--vocab", type=int, help="skip loading the tokenizer (testing)")
     ap.add_argument("--startup-timeout", type=float, default=2400,
                     help="seconds to wait for the server to start (large models load slowly)")
